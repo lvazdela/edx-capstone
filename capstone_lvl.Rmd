@@ -1,0 +1,851 @@
+---
+title: 'Edx Capstone: Movielens Project'
+author: "Luis G. Vazquez de Lara Cisneros."
+date: "12/11/2020"
+output:
+  bookdown::pdf_document2: default
+urlcolor: blue
+params:
+  coldef: 'darkolivegreen4'
+  filldef: 'darkolivegreen2'
+bibliography: references.bib
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+<!--IMPORTANT: THE FILE references.bib MUST BE IN THE WORKING DIRECTORY.
+Download references.bib from https://github.com/lvazdela/edx-capstone.git-->
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+```
+
+```{r librerias, message=FALSE, results='hide'}
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(caret)
+library(kableExtra)
+```
+
+```{r edxcreation, message=FALSE, results='hide', warning=FALSE}
+# //////////////////////////////////////////////////////////
+# / Create edx set, validation set (final hold-out test set)
+# //////////////////////////////////////////////////////////
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+# if using R 3.6 or earlier
+# movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+#                                            title = as.character(title),
+#                                            genres = as.character(genres))
+# if using R 4.0 or later
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+# if using R 3.5 or earlier, use `set.seed(1)` instead
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+# Introduction/overview/executive summary
+
+A recommendation system may be defined as a software tool providing suggestions to users for certain items [@ricci2011]. More formally, is considered a decision making strategy for users under complex information environments [@isinkaye2015]. RS are primarily used in E-commerce websites, such as Netflix, YouTube, Spotify, Amazon and so on, but they are of use in social media platforms as well. Recommendaton systems (RS) help to solve the problem of information overload, providing Internet users with personalized content and services [@isinkaye2015]. RS can be broadly classified in collaborative filtering, content based filtering or hybrid filtering [@isinkaye2015], with their own strengths and weaknesses each . In collaborative filtering algorithms, the general idea is that after analyzing many rating data by many users for many items, the rating of an unknown item by certain user can be predicted [@hahsler]. This approach has some limitations, such as cold start, scalability and sparsity. RS using content-based filtering analyze user's previous behavior and recommend items based on some features; one limitation is that require considerable data to build a reliable classifier [@reddy2018]. Hybrid systems combine both collaborative and content systems, aiming to reduce the limitations present in both methods. The field of RS research was boosted after the Netflix challenge. In 2006 this company offered a prize of one million dollars to the data science community. The prize could be won for those improving the current recommendation algorithm by 10% [@lohr2009].
+
+The present work is part of the capstone course of the *Edx Data Science Professional Certificate*, where the student is challenged to build a recommendation system using the MovieLens 10M Dataset.
+This data set comprises 10 million ratings and 100,000 tag applications applied to 10,000 movies by 72,000 users.
+To achieve this goal, I will do the following:
+
+-   Divide the MovieLens 10M dataset in two sets: a set to perform the training of the algorithms (`edx` set) and a `validation` set to validate the final model (the code was provided by the course staff).
+
+-   The validation set will be used only once at the very end of the process.
+
+-   Select the general strategy and the features that will be included in the models, giving the rationale of these decisions.
+
+-   Divide the `edx` set in a training set and a test set, using 80% and 20% of the ratings respectively.
+    As the names imply, the train set will be used to develop the models and the test set to evaluate their performance.
+
+-   The metric I will use to test the performance of the models will be the residual mean squared error (RMSE).
+    This loss function was used in the Netflix challenge to decide on a winner.
+
+-   Evaluate the best model with the best RMSE using the `validation` set.
+
+The RMSE will be calculated as follows:
+
+```{=tex}
+\begin{equation}
+\label{eq:rmse}
+\mbox{RMSE} = \sqrt{\frac{1}{N} \sum_{u,i}^{} \left( \hat{y}_{u,i} - y_{u,i} \right)^2 }
+\end{equation}
+```
+# Methods/Analysis
+
+The number of algorithmic approaches used to address the Netflix challenge are numerous, a summary of these techniques were reviewed by Edwin Chen [@chen] and are summarized in table \@ref(tab:methrecsys).
+
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Strategy                        | Explanation                                                                                                                                                                       |
++=================================+===================================================================================================================================================================================+
+| Normalization of global effects | The overall rating given to a movie is decomposed in several baseline predictors, such as the movie effect, the user effect, the interaction between the user and the movie, etc. |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Neighborhood models             | Prediction relies on the similarity among items, or among users.                                                                                                                  |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Implicit data                   | Similar to the neighborhood approach, but an offset weight is added depending on implicit information like preference for a certain type of movie.                                |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Matrix factorization            | Similar to neighborhood models, but with a more global view.                                                                                                                      |
+|                                 | It decomposes users and movies into a set of latent factors.                                                                                                                      |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Regression                      | Standard regression models either with a user-centric or movie-centric approach.                                                                                                  |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Restricted Boltzmann Machines   | Generally speaking, Restricted Bolstzmann Machines perform a binary version of factor analysis, more technically, is a stochastic neural network.                                 |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Temporal effects                | Ratings can be influenced by temporal effects, such as the year of appearance, time from first rating, etc.                                                                       |
+|                                 | Thus, user factors are modeled in a time-dependent manner.                                                                                                                        |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Regularization                  | Regularization allows to penalize large estimates formed by small sample sizes.                                                                                                   |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| Ensemble methods                | Several methods are combined and provide a single rating that takes advantage of the strengths of each model.                                                                     |
+|                                 | Gradient boosted decision trees and linear regression were used to combine algorithms.                                                                                            |
++---------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+: summary of the techniques employed by researchers in the Netflix Challenge. (\#tab:methrecsys)
+
+R provides a number of packages with algorithms for recommendation systems.
+The `recommenderlab` package is mentioned in the textbook of the course.
+This package, developed by Michael Hahsler, is described by the author as a framework for developing and testing recommendation algorithms.
+The `recosystem` package uses parallel matrix factorization.
+The package `rrecsys` includes several algorithms, such as Global/Item/User-Average baselines and Weighted Slope One among others.
+Trying to use these packages for this assignment are well beyond the scope of the course.
+Moreover, the size of the database and the intensity of the computations are not supported by a commodity laptop.
+In view of the above, I will just work with the strategy we learned in the Machine Learning course.
+I will develop the following models:
+
+-   Model based on the normalization of the movie and the user effects.
+-   Model based on the normalization of the movie and the user effects, with regularization.
+-   Model based on the normalization of the movie and the user effects, adding the effect of genre.
+-   Model based on the normalization of the movie and the user effects, adding the effect of genre, with regularization.
+-   Model based on the normalization of the movie and the user effects, adding the effect of ratings per year since the movie came out.
+-   Model based on the normalization of the movie and the user effects, adding the effect of ratings per year since the movie came out, with regularization.
+
+## Movie and user effects
+
+Figure \@ref(fig:fmovuser), gives us insight on the variability in the number of times a movie gets rated and on the number of ratings the users provide.
+Some movies get rated more than others, and some users are more active than others.
+These observations give the rationale to use them as baseline predictors.
+
+```{r fmovuser, echo=FALSE, fig.cap= 'variability of movie and user ratings.'}
+g1 <- edx %>% 
+  count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, fill = 'darkolivegreen2', color = 'darkolivegreen4' ) + 
+  scale_x_log10() + 
+  ggtitle("Movies") +
+  labs(x = 'Number of times a movie gets rated',
+       y = 'Number of movies')
+
+g2 <- edx %>% 
+  count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, fill = params$filldef, color = params$coldef) + 
+  scale_x_log10() + 
+  ggtitle("Users") +
+  labs(x = 'Number of times a user rates a movie',
+       y = 'Number of users')  
+gridExtra::grid.arrange(g1, g2, ncol = 2)
+```
+
+### Model with normalization of the movie and the user effects
+
+In view of the above, I developed a first model based on the normalization of the movie and the user effects:
+
+```{=tex}
+\begin{equation}
+\label{eq:modui}
+ Y_{u,i} = \mu + b_i + b_u + \varepsilon_{u,i}
+\end{equation}
+```
+The estimates of $b_i$ will be approximated with the average of:
+
+```{=tex}
+\begin{equation}
+\label{eq:bi}
+ Y_{u,i} - \hat{\mu}
+\end{equation}
+```
+for each movie $i$.
+
+The estimates of $b_u$ will be approximated with the average of:
+
+```{=tex}
+\begin{equation}
+\label{eq:bu}
+ Y_{u,i} - \hat{\mu}-\hat{b}_i
+\end{equation}
+```
+for each user $u$.
+
+### Normalization of the movie and the user effects with regularization
+
+The next step is to create the model of equation (\ref{eq:modui}), but with a regularization technique.
+The BellKor solution used L2 regularization, also called ridge regression [@korena].
+The general idea is to add a penalization to avoid overfitting when there are very few items to estimate the coefficient.
+Instead of minimizing the least squares equation, we minimize an equation that adds a penalty:
+
+```{=tex}
+\begin{equation}
+\label{eq:regu}
+\sum_{u,i} \left(y_{u,i} - \mu - b_i - b_u \right)^2 + \lambda \left(\sum_{i} b_i^2 + \sum_{u} b_u^2\right)
+\end{equation}
+```
+Solving for $\hat{b}_i(\lambda)$ using calculus we get:
+
+```{=tex}
+\begin{equation}
+\label{eq:lambdai}
+\hat{b}_i(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu}\right)
+\end{equation}
+```
+Solving for $\hat{b}_u(\lambda)$ using calculus we get:
+
+```{=tex}
+\begin{equation}
+\label{eq:lambdau}
+\hat{b}_u(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu} - \hat{b}_i\right)
+\end{equation}
+```
+By cross-validation, we can find the value of $\lambda$ that minimizes the RMSE.
+
+## Genre effect
+
+Genre is also an important variable.
+The `edx` database has a column with the genre of the movies.
+A movie has more than one genre in general.
+Figure \@ref(fig:fgenre) shows the relationship between the genres (grouped as in the database) and the mean rating.
+
+```{r fgenre, echo=FALSE, fig.cap= 'effect of genre on rating. Only movies with more than 50000 ratings are shown. Bars represent three standard errors.', message=FALSE, fig.align='left'}
+edx %>%
+  group_by(genres) %>%
+  summarize(n = n(), avg = mean(rating), se = sd(rating)/sqrt(n())) %>% filter(n >= 50000) %>%
+  mutate(genres = reorder(genres, avg)) %>%
+  ggplot(aes(x = genres, y = avg, ymin = avg - (3*se), ymax = (avg + 3*se))) +
+  geom_point(color = I(params$coldef)) +
+  geom_errorbar(color = I(params$coldef)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  labs(x = 'Genres', y = 'Rating average')
+```
+
+```{r numcomb, message=FALSE}
+numcomb <- edx %>%
+  distinct(genres) %>%
+  select(genres) %>%
+  pull(genres) %>%
+  length
+
+```
+
+```{r genrefortext, message=FALSE}
+lgenres <- levels(as.factor(edx$genres))
+ugenres <- str_split(lgenres, '\\|') %>% unlist
+ugenres <- sort(unique(ugenres))
+
+numgenders <- function(x){
+  ng <-  edx %>%
+    filter(str_detect(genres, x)) %>%
+    summarise(mean = mean(rating),
+              n = n())
+  return(c(ng$mean,ng$n))
+  
+}
+mxugenres <- sapply(ugenres, numgenders)
+
+mxugenres <- t(mxugenres)
+genreMaxMovies <- rownames(mxugenres)[which.max(mxugenres[,2])]
+genreMinMovies <- rownames(mxugenres)[which.min(mxugenres[-1,2])+1]
+genreMaxRating <- rownames(mxugenres)[which.max(mxugenres[,1])]
+genreMinRating <- rownames(mxugenres)[which.min(mxugenres[-1,1])+1]
+
+bdugenres <- data.frame(rating = round(mxugenres[,1],2),
+                        movies = format(mxugenres[,2],nsmall = 0, big.mark = ','))
+numMaxMovies <- bdugenres$movies[which(row.names(bdugenres) == genreMaxMovies)]
+numMinMovies <- bdugenres$movies[which(row.names(bdugenres) == genreMinMovies)]
+numMaxRating <- bdugenres$rating[which(row.names(bdugenres) == genreMaxRating)]
+numMinRating <- bdugenres$rating[which(row.names(bdugenres) == genreMinRating)]
+```
+
+The number of genre combinations are `r numcomb`.
+For modeling purposes, I splitted the combinations into their individual genres.
+In table \@ref(tab:tgenres), I show the genres used.
+Seven movies had no genre listed, the genre *`r genreMaxRating`* had the highest average rating (`r numMaxRating`), the genre most frequently found was *`r genreMaxMovies`*, `r numMaxMovies` films fell in this genre.
+On the contrary, the genre *`r genreMinRating`* had de lowest rating (`r numMinRating`), the genre with less movies was *`r genreMinMovies`*, with only `r numMinMovies` pictures classified in this genre.
+
+```{r tgenres, message=FALSE }
+kable(bdugenres, caption = "genres used in the edx dataset.", col.names = c('Average rating',
+                                                                           'Number of movies'))
+```
+
+### Normalization of the movie and the user effects, adding the effect of genre.
+
+This approach falls in the category of *content-based filtering*.
+One of the mathematical approaches described in the literature is to create a rating matrix and calculate the Ecuclidian distance between current users and other users [@reddy2018].
+The package `recommenderlab` has implemented this algorithm, but due to the size of `edx` this cannot be done in a commodity laptop.
+Instead, we will normalize the genre effect, summing up the contribution of each genre, as follows:
+
+```{=tex}
+\begin{equation}
+\label{eq:modgenre}
+Y_{u,i} = \mu + b_i + b_u + \sum_{k=1}^K x_{u,i} \beta_k + \varepsilon_{u,i}
+\end{equation}
+```
+with $x^k_{u,i} = 1$ if $g_{u,i}$ is genre $k$, and $K$ the number of genres of $ith$ movie.
+
+I will estimate $\beta_k$, the contribution of the genre to the rating as the average of: $$ Y_{u,i} - \hat{\mu} - \hat{b}_i - \hat{b}_u $$ for each movie genre $k$.
+
+### Normalization of the movie and the user effects, adding the effect of genre, with regularization.
+
+I will use the the model of equation (\ref{eq:modgenre}), but the estimation of $\hat{b}_k$ will be done with the equation (\ref{eq:genrereg}).
+The values of $\hat{b}_u$ and $\hat{b}_i$ will be estimated using the equations (\ref{eq:lambdai}) and (\ref{eq:lambdau}) respectively.
+
+```{=tex}
+\begin{equation}
+\label{eq:genrereg}
+\hat{b}_k(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu} - \hat{b}_u - \hat{b}_i \right)
+\end{equation}
+```
+For each genre $k$.
+Due to computational limitations, the value of $\lambda$ calculated in the regularized model with the movie and user effects will be used.
+
+## Ratings per year effect.
+
+Most rated movies tend to have better ratings.
+To give evidence of this, I stratified the movies by ratings per year and calculate their average ratings.
+Figure \@ref(fig:rperysmooth) depicts the trend of this quantity and the average rating.
+We can see that as a movie gets more rated, the average rating increases.
+
+```{r rperysmooth, fig.cap='Relationship between ratings per year and rating.', message=FALSE}
+edx %>%
+  mutate(year = as.numeric(str_sub(title, start = str_length(title)-4, end = str_length(title)-1 ))) %>%
+  group_by(movieId) %>%
+  summarize(n = n(),
+            years = 2018 - first(year),
+            myrating = mean(rating)) %>%
+  mutate(yrate = round(n/years)) %>%
+    ggplot(aes(yrate, myrating)) +
+  geom_point(color = params$coldef) +
+  geom_smooth(fill= params$filldef) +
+  labs(x = 'Ratings per year since the movie premiered',
+       y = 'Rating')
+```
+
+To create the predictive model using this variable, I will transform the ratings per year to a categorical variable, creating intervals.
+Figure \@ref(fig:rpyrcat) shows that the trend is mantained.
+
+```{r rpyrcat, fig.cap='Relationship between ratings per year and rating, creating intervals on the number of ratings per year since de movie premiered.', message=FALSE}
+edx %>%
+  mutate(year = as.numeric(str_sub(title, start = str_length(title)-4, end = str_length(title)-1 ))) %>%
+  group_by(movieId) %>%
+  summarize(n = n(),
+            years = 2018 - first(year),
+            myrating = mean(rating)) %>%
+  mutate(yrate = round(n/years)) %>%
+  mutate(yrate = case_when(yrate <= 50 ~ 50,
+                           between(yrate, 51,100) ~ 100,
+                           between(yrate, 101, 200) ~ 200,
+                           between(yrate, 201, 300) ~ 300,
+                           between(yrate, 301, 400) ~ 400,
+                           between(yrate, 401, 500) ~ 500,
+                           between(yrate, 501, 600) ~ 600,
+                           between(yrate, 601, 700) ~ 700,
+                           between(yrate, 701, 800) ~ 800,
+                           between(yrate, 801, 900) ~ 900,
+                           between(yrate, 901, 1000) ~ 1000,
+                           between(yrate, 1001, 1100) ~ 1100,
+                           between(yrate, 1101, 1200) ~ 1200,
+                           between(yrate, 1201, 1300) ~ 1300,
+                           between(yrate, 1301, 1400) ~ 1400,
+                           yrate >= 1401 ~ 1500
+  )) %>%
+  ggplot(aes(x = as.factor(yrate), y = myrating)) +
+  geom_boxplot(fill = params$filldef, color = params$coldef) +
+  labs(x = 'Ratings per year since the movie premiered',
+       y = 'Rating')
+```
+
+### Model based on the normalization of the movie and the user effect, adding the effect of ratings per year.
+
+The exploration data analysis provides graphic evidence that there is a relationship between the ratings per year and the rating.
+I will use a very naive approach: I will transform the ratio into a categorical variable, and the model will be:
+
+```{=tex}
+\begin{equation}
+\label{eq:modyr}
+Y_{u,i} = \mu + b_i + b_u + b_{yr} + \varepsilon_{u,i}
+\end{equation}
+```
+Where $b_{yr}$ will be calculated as the average of: $$ Y_{u,i}- \mu - b_i - b_u $$ for each $yr_i$, where: $$yr_i = n/(2018-year)$$ $year$ is the year the movie premiered.
+
+### Model based on the normalization of the movie and the user effect, adding the effect of the ratio: ratings per year/number of years since the movie came out, with regularization.
+
+The same model as in equation (\ref{eq:modyr}), but $b_{yr}$ will be estimated as follows:
+
+```{=tex}
+\begin{equation}
+\label{eq:yrreg}
+\hat{b}_{yr}(\lambda) = \frac{1}{\lambda + n_i} \sum_{u=1}^{n_i} \left(Y_{u,i} - \hat{\mu} - \hat{b}_u - \hat{b}_i\right)
+\end{equation}
+```
+for each $yr_i$.
+The values of $\hat{b}_u$ and $\hat{b}_i$ will be estimated using the equations (\ref{eq:lambdai}) and (\ref{eq:lambdau}) respectively.
+The best value of $\lambda$ which minimizes RMSE will be calculated by cross-validation.
+
+# Results
+
+```{r maincode, message=FALSE, warning=FALSE, results= 'hide'}
+#Partition of edx dataset
+set.seed(395914)
+test_index <- createDataPartition(y = edx$rating, times = 1,
+                                  p = 0.2, list = FALSE)
+train_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+
+test_set <- test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+lentrain <- format(dim(train_set)[1], nsmall = 0, big.mark = ',' )
+lentest <- format(dim(test_set)[1], nsmall = 0, big.mark = ',' )
+#allow for memory space
+rm(edx)
+
+# RMSE function
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+
+#_______________________________________
+#Model with the user and movie effects
+#_______________________________________
+mu <- mean(train_set$rating)
+movie_avgs <- train_set %>%
+  group_by(movieId) %>%
+  summarise(b_i = mean(rating - mu))
+
+user_avgs <- train_set %>%
+  left_join(movie_avgs, by = 'movieId') %>%
+  group_by(userId)%>%
+  summarise(b_u = mean(rating - mu - b_i))
+
+
+modelui <- test_set %>%
+  left_join(movie_avgs, by = 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  select(pred) %>%
+  pull
+
+rmse_ui <- RMSE(test_set$rating, modelui)
+
+#_______________________________________
+#Model with the user and movie effects, with regularization
+#_______________________________________
+#Calculation of lambda by cross-validation for the model of user and movie effects with regularization
+
+lambdas_ui <- seq(4.75, 4.85, 0.02)
+
+rmses_ui <- sapply(lambdas_ui, function(l){
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  b_u <- train_set %>%
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  predicted_ratings <-
+    test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+lambda_ui <- lambdas_ui[which.min(rmses_ui)]
+
+#Model with the user and movie effects,with regularization
+pb_i <- train_set %>%
+  group_by(movieId) %>%
+  summarise(pb_i = sum(rating - mu)/(lambda_ui + n()))
+pb_u <- train_set %>% 
+  left_join(pb_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(pb_u = sum(rating - pb_i - mu)/(lambda_ui + n()))
+
+pen_thirdmodel <- test_set %>%
+  left_join(pb_i, by = 'movieId') %>%
+  left_join(pb_u, by = 'userId') %>%
+  mutate(pred = mu + pb_i + pb_u)
+
+#RMSE of model_ui_pen:
+rmse_ui_pen <- RMSE(pen_thirdmodel$pred, test_set$rating) # 0.8658014
+
+#___________________________________________________
+# Model with the genre, without regularization
+#____________________________________________________
+lgenres2 <- levels(as.factor(train_set$genres))
+ugenres2 <- str_split(lgenres2, '\\|') %>% unlist
+ugenres2 <- sort(unique(ugenres2))
+ugenres2 = ugenres2[-1]
+
+#Function to calculate the coefficients of the movie genres.
+fbetas_k <- function(x){
+  train_set %>%
+    filter(str_detect(genres, x)) %>%
+    left_join(movie_avgs, by = 'movieId') %>%
+    left_join(user_avgs, by = 'userId') %>%
+    summarise(beta_gk = mean(rating - mu - b_i - b_u)) %>%
+    pull(beta_gk)
+}
+
+betas_k <- sapply(ugenres2, fbetas_k)
+
+x_uik <- train_set %>%
+  filter(genres != '(no genres listed)')%>%
+  distinct(genres)%>%
+  mutate(
+    Action = if_else(str_detect(genres, ugenres2[1]), betas_k[1], 0),
+    Adventure = if_else(str_detect(genres, ugenres2[2]), betas_k[2], 0),
+    Animation = if_else(str_detect(genres, ugenres2[3]), betas_k[3], 0),
+    Children = if_else(str_detect(genres, ugenres2[4]), betas_k[4], 0),
+    Comedy = if_else(str_detect(genres, ugenres2[5]), betas_k[5], 0),
+    Crime = if_else(str_detect(genres, ugenres2[6]), betas_k[6], 0),
+    Documentary = if_else(str_detect(genres, ugenres2[7]), betas_k[7], 0),
+    Drama = if_else(str_detect(genres, ugenres2[8]), betas_k[8], 0),
+    Fantasy = if_else(str_detect(genres, ugenres2[9]), betas_k[9], 0),
+    FilmNoir = if_else(str_detect(genres, ugenres2[10]), betas_k[10], 0),
+    Horror = if_else(str_detect(genres, ugenres2[11]), betas_k[12], 0),
+    IMAX = if_else(str_detect(genres, ugenres2[12]), betas_k[12], 0),
+    Musical = if_else(str_detect(genres, ugenres2[13]),betas_k[13], 0),
+    Mistery = if_else(str_detect(genres, ugenres2[14]), betas_k[14], 0),
+    Romance = if_else(str_detect(genres, ugenres2[15]), betas_k[15], 0),
+    SciFi = if_else(str_detect(genres, ugenres2[16]), betas_k[16], 0),
+    Thriller = if_else(str_detect(genres, ugenres2[17]), betas_k[17], 0),
+    War = if_else(str_detect(genres, ugenres2[18]), betas_k[18], 0),
+    Western = if_else(str_detect(genres, ugenres2[19]), betas_k[19], 0)
+  )%>%
+  mutate(sumK = rowSums(.[,2:20], na.rm = TRUE),
+         genres = as.factor(genres)) %>%
+  select(genres, sumK)
+
+
+#Model with genres
+modelwgenres <- test_set %>%
+  filter(genres != '(no genres listed)') %>%
+  mutate(genres = as.factor(genres)) %>%
+  left_join(movie_avgs, by= 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  left_join(x_uik, by = 'genres') %>%
+  mutate(pred = mu + b_u + b_i + sumK) %>%
+  select(pred, rating)
+
+rmse_genres <- RMSE(modelwgenres$pred, modelwgenres$rating)
+
+#___________________________________________________
+# Model with the genre, with regularization
+#____________________________________________________
+fbetas_kpen <- function(x){
+    train_set %>%
+    filter(str_detect(genres,x)) %>%
+    left_join(movie_avgs, by = 'movieId') %>%
+    left_join(user_avgs, by = 'userId') %>%
+    summarise(beta_gk = sum(rating - mu - b_i - b_u)/(n()+lambda_ui)) %>%
+    pull(beta_gk)
+}
+
+betas_kpen <- sapply(ugenres2, fbetas_kpen)
+
+x_uikpen <- train_set %>%
+  filter(genres != '(no genres listed)')%>%
+  distinct(genres)%>%
+  mutate(
+    Action = if_else(str_detect(genres, ugenres2[1]), betas_kpen[1], 0),
+    Adventure = if_else(str_detect(genres, ugenres2[2]), betas_kpen[2], 0),
+    Animation = if_else(str_detect(genres, ugenres2[3]), betas_kpen[3], 0),
+    Children = if_else(str_detect(genres, ugenres2[4]), betas_kpen[4], 0),
+    Comedy = if_else(str_detect(genres, ugenres2[5]), betas_kpen[5], 0),
+    Crime = if_else(str_detect(genres, ugenres2[6]), betas_kpen[6], 0),
+    Documentary = if_else(str_detect(genres, ugenres2[7]), betas_kpen[7], 0),
+    Drama = if_else(str_detect(genres, ugenres2[8]), betas_kpen[8], 0),
+    Fantasy = if_else(str_detect(genres, ugenres2[9]), betas_kpen[9], 0),
+    FilmNoir = if_else(str_detect(genres, ugenres2[10]), betas_kpen[10], 0),
+    Horror = if_else(str_detect(genres, ugenres2[11]), betas_kpen[12], 0),
+    IMAX = if_else(str_detect(genres, ugenres2[12]), betas_kpen[12], 0),
+    Musical = if_else(str_detect(genres, ugenres2[13]),betas_kpen[13], 0),
+    Mistery = if_else(str_detect(genres, ugenres2[14]), betas_kpen[14], 0),
+    Romance = if_else(str_detect(genres, ugenres2[15]), betas_kpen[15], 0),
+    SciFi = if_else(str_detect(genres, ugenres2[16]), betas_kpen[16], 0),
+    Thriller = if_else(str_detect(genres, ugenres2[17]), betas_kpen[17], 0),
+    War = if_else(str_detect(genres, ugenres2[18]), betas_kpen[18], 0),
+    Western = if_else(str_detect(genres, ugenres2[19]), betas_kpen[19], 0)
+  )%>%
+  mutate(sumK = rowSums(.[,2:20], na.rm = TRUE),
+         genres = as.factor(genres)) %>%
+  select(genres, sumK)
+
+
+#Model with genres
+modelwgenres_pen <- test_set %>%
+  filter(genres != '(no genres listed)') %>%
+  mutate(genres = as.factor(genres)) %>%
+  left_join(movie_avgs, by= 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  left_join(x_uikpen, by = 'genres') %>%
+  mutate(pred = mu + b_u + b_i + sumK) %>%
+  select(pred, rating)
+
+rmse_genres_pen <- RMSE(modelwgenres_pen$pred, modelwgenres_pen$rating)
+
+#____________________________________________________
+# Model with the number of ratings per year, without regularization
+#____________________________________________________
+year_rate1 <- train_set %>%
+  mutate(year = as.numeric(str_sub(title, start = str_length(title)-4, end = str_length(title)-1 ))) %>%
+  group_by(movieId) %>%
+  summarize(n = n(),
+            years = 2018 - first(year),
+            myrating = mean(rating)) %>%
+  mutate(yrate = round(n/years))
+
+
+year_rate <-
+  year_rate1 %>%
+  mutate(yrate = case_when(yrate <= 50 ~ 50,
+                           between(yrate, 51,100) ~ 100,
+                           between(yrate, 101, 200) ~ 200,
+                           between(yrate, 201, 300) ~ 300,
+                           between(yrate, 301, 400) ~ 400,
+                           between(yrate, 401, 500) ~ 500,
+                           between(yrate, 501, 600) ~ 600,
+                           between(yrate, 601, 700) ~ 700,
+                           between(yrate, 701, 800) ~ 800,
+                           between(yrate, 801, 900) ~ 900,
+                           between(yrate, 901, 1000) ~ 1000,
+                           between(yrate, 1001, 1100) ~ 1100,
+                           between(yrate, 1101, 1200) ~ 1200,
+                           between(yrate, 1201, 1300) ~ 1300,
+                           between(yrate, 1301, 1400) ~ 1400,
+                           yrate >= 1401 ~ 1500
+  )) %>%
+  mutate(yrate = as.factor(yrate)) %>%
+  select(movieId, yrate)
+
+plusyear <- train_set %>%
+  left_join(movie_avgs, by = 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  left_join(year_rate, by = 'movieId') %>%
+  group_by(yrate)%>%
+  summarise(b_y = mean(rating - mu - b_i - b_u)) %>%
+  right_join(year_rate, by = 'yrate')
+
+model_ryr <- test_set %>%
+  left_join(movie_avgs, by = 'movieId') %>%
+  left_join(user_avgs, by = 'userId') %>%
+  left_join(plusyear, by = 'movieId') %>%
+  mutate(pred = mu + b_i + b_u + b_y)%>%
+  select(pred, rating)
+
+
+rmse_ryr <- RMSE(model_ryr$rating, model_ryr$pred) #0.8662424
+
+#_________________________________________________
+# MODEL WITH THE RATINGS PER YEAR USING PENALIZED LEAST OF SQUARES
+#_________________________________________________
+
+# cross-validation to find the best lambda:
+lambdas_ryr <- seq(4, 5, 0.2)
+
+rmses_ryr <- sapply(lambdas_ryr, function(l){
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+
+  b_u <- train_set %>%
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+
+  b_y <- train_set %>%
+    left_join(b_i, by = 'movieId') %>%
+    left_join(b_u, by = 'userId') %>%
+    left_join(year_rate, by = 'movieId') %>%
+    group_by(yrate) %>%
+    summarise(b_y = sum(rating - mu - b_i - b_u)/(n()+l)) %>%
+    right_join(year_rate, by = 'yrate')
+
+  predicted_ratings <-
+    test_set %>%
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    left_join(b_y, by = 'movieId') %>%
+    mutate(pred = mu + b_i + b_u + b_y) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+
+lambda_ryr <- lambdas_ryr[which.min(rmses_ryr)]
+
+#With the best lambda, 
+b_i_pen <- train_set %>%
+  group_by(movieId) %>%
+  summarise(b_i = sum(rating - mu)/(n()+lambda_ryr))
+
+b_u_pen <- train_set %>% 
+  left_join(b_i_pen, by="movieId") %>%
+  group_by(userId) %>%
+  summarize(b_u = sum(rating - b_i - mu)/(n()+lambda_ryr))
+
+b_y_pen <- train_set %>%
+  left_join(b_i_pen, by = 'movieId') %>%
+  left_join(b_u_pen, by = 'userId') %>%
+  left_join(year_rate, by = 'movieId') %>%
+  group_by(yrate) %>%
+  summarise(b_y = sum(rating - mu - b_i - b_u)/(n()+ lambda_ryr)) %>%
+  right_join(year_rate, by = 'yrate')
+
+model_ryr_pen <-
+  test_set %>%
+  left_join(b_i_pen, by = 'movieId') %>%
+  left_join(b_u_pen, by = 'userId') %>%
+  left_join(b_y_pen, by = 'movieId') %>%
+  mutate(pred = rating + b_i + b_u + b_y) %>%
+  select(pred, rating)
+
+rmse_ryr_pen <- RMSE(model_ryr_pen$pred, model_ryr_pen$rating) # 0.6017065
+
+```
+
+The code used to create the models is not shown in this document, but it can be seen in the [corresponding .rmd file](https://github.com/lvazdela/edx-capstone.git) from the github repository.
+I splitted the `edx` dataset in a `train_set` and a `test_set` using the `caret` package.
+The training set comprised 80% of the `edx` database (`r lentrain` ratings), thus the test set was formed by the remaining 20% (`r lentest` ratings).
+
+The RMSE of the model which only took into account the user and the movie effects [see equation (\ref{eq:modui})] was `r rmse_ui`.
+For the model with regularization, the best $\lambda$ for $\hat{b}_i$ and $\hat{b}_u$ calculated with the equations (\ref{eq:lambdai}) and (\ref{eq:lambdau}) was found with cross-validation.
+Figure \@ref(fig:figlambdas) shows that the value of $\lambda$ which minimizes the RMSE is `r lambda_ui`.
+The regularization improved the RMSE to `r rmse_ui_pen`.
+
+```{r figlambdas, fig.cap='effect of differents values of $\\lambda$ on the RMSE of the model with the user and movie effects.'}
+qplot(lambdas_ui, rmses_ui,
+      colour = I(params$coldef),
+      xlab = expression('Value of '~ lambda),
+      ylab = 'RMSE')
+```
+
+The model which included the genre [see equation (\ref{eq:modgenre})] reported a RMSE of `r rmse_genres` when tested against the test set.
+When the regularization was used, the RMSE did not change (`r rmse_genres_pen`).
+
+The next model I tested included the ratings per year, using the equation (\ref{eq:modyr}).
+The RMSE obtained with this approach was `r rmse_ryr`.
+For the model with regularization, the coefficients for the ratings-per-year effect were calculated as in equation (\ref{eq:yrreg}), $\hat{b}_i$ and $\hat{b}_u$ were calculated with the equations (\ref{eq:lambdai}) and (\ref{eq:lambdau}) respectively.
+The best $\lambda$ was found using cross-validation.
+Figure \@ref(fig:figlambryr) shows the relation between several values of $\lambda$ and the RMSE obtained.
+The value of $\lambda$ which renders the best RMSE is `r lambda_ryr`.
+Surprisingly, the RMSE with the regularized model which included the ratings per year dropped down to `r rmse_ryr_pen`.
+
+```{r figlambryr, fig.cap='effect of differents values of $\\lambda$ on the RMSE of the model with the ratings-per-year effect.'}
+qplot(lambdas_ryr, rmses_ryr,
+      colour = I(params$coldef),
+      xlab = expression('Value of '~ lambda),
+      ylab = 'RMSE')
+
+```
+
+Table \@ref(tab:tsummary) summarises the results obtained with the models tested, ordered according to the RMSE obtained.
+According to this loss function, the models with regularization tended to perform better.
+The RMSE improvement obtained in the model which added the ratings-per-year effect with regularization must be seen with caution, as the Netflix challenge considered worthy improvements of 10%.
+Furthermore, considering that the mathematical approach is right, the variable *ratings-per-year* is of little use, as new movies have less chance to be rated.
+
+```{r tsummary, message=FALSE}
+rmsestab <- data.frame(model = c('Normalization of movie and user effects',
+                                 'Normalization of movie and user effects, with regularization',
+                                 'Movie and user effects, adding the effect of genre',
+                                 'Movie and user effects, adding the effect of genre with regularization',
+                                 'Movie and user effects, adding the ratings-per-year effect',
+                                 'Movie and user effects, adding the ratings-per-year effect with regularization'),
+                       rmse = c(rmse_ui, rmse_ui_pen, rmse_genres, rmse_genres_pen, rmse_ryr, rmse_ryr_pen)) %>%
+  arrange(rmse)
+kable(rmsestab, caption = 'Summary of the performance of the different algorithms tested.',
+      col.names = c('MODELS', 'RMSE'))
+
+```
+
+## Performance of the best model with the validation set
+
+The model that considered the user, movie and the ratings-per-year effects with regularization was tested in the `validation` set.
+Table \@ref(tab:tresfin) shows the value of RMSE.
+It is not very different from the one obtained when the test set was used[^1].
+
+[^1]: For some reason, some movies in the training set did not appeared in the validation set, thus `NAs` were omitted to calculate the RMSE.
+
+```{r tresfin, message=FALSE}
+#load('validation.rda')
+model_ryr_pen_fin <-
+  validation %>%
+  left_join(b_i_pen, by = 'movieId') %>%
+  left_join(b_u_pen, by = 'userId') %>%
+  left_join(b_y_pen, by = 'movieId') %>%
+  mutate(pred = rating + b_i + b_u + b_y) %>%
+  select(pred, rating) %>%
+  na.omit
+
+rmse_best <- RMSE(model_ryr_pen_fin$pred, model_ryr_pen_fin$rating)
+
+finalres <- data.frame(model = c('Movie and user effects, adding the ratings-per-year effect with regularization'),
+                       rmse = c(rmse_best))
+
+kable(finalres, caption = 'Performance of the model with the best RMSE using the validation set',
+      col.names = c('MODEL', 'RMSE')) %>%
+  kable_styling(latex_options = 'hold_position')
+```
+
+# Conclusion
+
+The developement of recommendation systems is a promising area of research.
+Better mathematical models will impact other areas beyond the entertainment industry, as they can be applied across the fields of science, commerce and politics.
+In this work, the models employed are rather modest, but only are intended to demonstrate the skills learned in the *Edx Data Science Certificate* courses.
+As mentioned in the Introduction section, some R packages are available, but the size of the `edx` database severely limits their use in a commodity laptop.
+With these limitations in mind, we can conclude that modeling a few baseline predictors such as those used in this work, can capture the main effects in the data.
+Future work may include datasets with behavioral and demographic data, such as location, age, gender and previously chosen movies, among others.
+
+# References
